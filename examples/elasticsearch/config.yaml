@@ -1,0 +1,10 @@
+searchx:
+  standalone:
+    - driver: elasticsearch
+      name: default
+      address:
+        - "http://localhost:9200"
+      username: ""
+      password: ""
+      tls:
+        enabled: false
