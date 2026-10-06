@@ -18,6 +18,8 @@ type StandaloneConfig struct {
 	TLS      TLSConfig `yaml:"tls" json:"tls" mapstructure:"tls"`
 	// EnableTrace 统一调用链开关（configx 配置键 enable_trace）
 	EnableTrace bool `yaml:"enable_trace" json:"enable_trace" mapstructure:"enable_trace"`
+	// LegacyCluster 兼容 ES 7.14 之前的集群（configx 配置键 legacy_cluster）
+	LegacyCluster bool `yaml:"legacy_cluster" json:"legacy_cluster" mapstructure:"legacy_cluster"`
 }
 
 // ClusterConfig 集群搜索引擎配置（Nacos/Apollo 远程配置中心，适用于多节点部署）
@@ -34,6 +36,8 @@ type ClusterConfig struct {
 	WatchEnabled bool `yaml:"watch_enabled" json:"watch_enabled" mapstructure:"watch_enabled"`
 	// EnableTrace 统一调用链开关（configx 配置键 enable_trace）
 	EnableTrace bool `yaml:"enable_trace" json:"enable_trace" mapstructure:"enable_trace"`
+	// LegacyCluster 兼容 ES 7.14 之前的集群（configx 配置键 legacy_cluster）
+	LegacyCluster bool `yaml:"legacy_cluster" json:"legacy_cluster" mapstructure:"legacy_cluster"`
 }
 
 // SearchSection 对应 configx.yaml 中的 searchx 配置节
@@ -94,24 +98,26 @@ func MustReadAndCreate(opts ...configx.ConfigOptions) SearchClient {
 
 func standaloneToConfig(s *StandaloneConfig) *Config {
 	return &Config{
-		Driver:      s.Driver,
-		Name:        s.Name,
-		Address:     s.Address,
-		Username:    s.Username,
-		Password:    s.Password,
-		TLS:         s.TLS,
-		EnableTrace: s.EnableTrace,
+		Driver:        s.Driver,
+		Name:          s.Name,
+		Address:       s.Address,
+		Username:      s.Username,
+		Password:      s.Password,
+		TLS:           s.TLS,
+		EnableTrace:   s.EnableTrace,
+		LegacyCluster: s.LegacyCluster,
 	}
 }
 
 func clusterToConfig(c *ClusterConfig) *Config {
 	return &Config{
-		Driver:      c.Driver,
-		Name:        c.Name,
-		Address:     c.Address,
-		Username:    c.Username,
-		Password:    c.Password,
-		TLS:         c.TLS,
-		EnableTrace: c.EnableTrace,
+		Driver:        c.Driver,
+		Name:          c.Name,
+		Address:       c.Address,
+		Username:      c.Username,
+		Password:      c.Password,
+		TLS:           c.TLS,
+		EnableTrace:   c.EnableTrace,
+		LegacyCluster: c.LegacyCluster,
 	}
 }

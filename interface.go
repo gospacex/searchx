@@ -49,19 +49,35 @@ type BulkOp struct {
 }
 
 // Config 搜索引擎配置
+//
+// 为什么逐字段都带三套 tag：本结构体是 configx 三个通道（yaml 本地文件 /
+// json 远程配置中心 / mapstructure viper）的共同落点。缺 mapstructure tag 时
+// viper 只能按**字段名**匹配，`enable_trace` / `legacy_cluster` 这类蛇形键解码
+// 不进来 —— 不报错，只是永远取零值，表现为「明明写了开关却没生效」。
+// 嵌套的 TLSConfig 同理（tls.enabled 需要两级 tag 都齐）。
 type Config struct {
-	Driver      string
-	Name        string
-	Address     []string
-	Username    string
-	Password    string
-	TLS         TLSConfig
-	EnableTrace bool
+	Driver      string    `yaml:"driver" json:"driver" mapstructure:"driver"`
+	Name        string    `yaml:"name" json:"name" mapstructure:"name"`
+	Address     []string  `yaml:"address" json:"address" mapstructure:"address"`
+	Username    string    `yaml:"username" json:"username" mapstructure:"username"`
+	Password    string    `yaml:"password" json:"password" mapstructure:"password"`
+	TLS         TLSConfig `yaml:"tls" json:"tls" mapstructure:"tls"`
+	EnableTrace bool      `yaml:"enable_trace" json:"enable_trace" mapstructure:"enable_trace"`
+	// LegacyCluster 兼容 Elasticsearch 7.14 之前的集群。
+	//
+	// 背景：官方 v8 客户端在每次 2xx 响应后无条件校验 X-Elastic-Product 响应头，
+	// 而 7.13 及更早的集群不返回该头，结果是任何请求都报
+	// "the client noticed that the server is not Elasticsearch and we do not support this unknown product"。
+	// 打开本开关后，驱动会在响应上补出该头，让校验通过。
+	//
+	// 默认关闭：只影响旧集群的连通性判定，不改变任何其它行为，也不放宽安全校验
+	// （TLS 仍按 cfg.TLS 处理）。升级到 7.14+ 后应当摘掉这个开关。
+	LegacyCluster bool `yaml:"legacy_cluster" json:"legacy_cluster" mapstructure:"legacy_cluster"`
 }
 
 // TLSConfig TLS 配置
 type TLSConfig struct {
-	Enabled bool
+	Enabled bool `yaml:"enabled" json:"enabled" mapstructure:"enabled"`
 }
 
 // FillDefaults 填充默认值

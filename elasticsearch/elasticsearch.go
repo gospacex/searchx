@@ -48,6 +48,11 @@ func New(cfg *searchx.Config) (*ClientImpl, error) {
 	if cfg.TLS.Enabled {
 		ht.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
+	// 旧集群（<7.14）不返回 X-Elastic-Product，v8 客户端会拒绝每一个 2xx 响应。
+	// 显式开启 legacy_cluster 时才包一层补齐该头；默认路径零开销、行为不变。
+	if cfg.LegacyCluster {
+		esCfg.Transport = &productHeaderTransport{base: ht}
+	}
 
 	var client *es.Client
 	if err := withRetry(func() error {
@@ -67,6 +72,30 @@ func New(cfg *searchx.Config) (*ClientImpl, error) {
 		logger: logx.GetGlobal(),
 		ht:     ht,
 	}, nil
+}
+
+// productHeaderTransport 在响应上补出 X-Elastic-Product 头，供官方 v8 客户端的
+// 产品校验通过；仅当 cfg.LegacyCluster 打开时挂载。
+//
+// 为什么做在 RoundTripper 这一层：客户端的校验发生在 Transport.Perform 返回之后、
+// 业务读到响应之前，改响应头是唯一既不动 SDK 源码、又不影响请求语义的注入点。
+// 只补 2xx 且不覆盖已有的值 —— 真集群自己带了头时以服务端为准。
+type productHeaderTransport struct {
+	base http.RoundTripper
+}
+
+// productHeader 是官方客户端校验时期望看到的固定值（genuineCheckHeader）。
+const productHeader = "X-Elastic-Product"
+
+func (t *productHeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	res, err := t.base.RoundTrip(req)
+	if err != nil || res == nil {
+		return res, err
+	}
+	if res.StatusCode >= 200 && res.StatusCode < 300 && res.Header.Get(productHeader) == "" {
+		res.Header.Set(productHeader, "Elasticsearch")
+	}
+	return res, nil
 }
 
 func (c *ClientImpl) Index(ctx context.Context, index string, doc searchx.Document) error {
@@ -101,21 +130,33 @@ func (c *ClientImpl) Get(ctx context.Context, index, id string) (searchx.Documen
 		ctx, span = c.tracer.Start(ctx, "db.elasticsearch.get")
 		defer span.End()
 	}
-	span.SetAttributes(
-		attribute.String("db.elasticsearch.index", index),
-		attribute.String("db.elasticsearch.id", id),
-	)
+	if span != nil {
+		span.SetAttributes(
+			attribute.String("db.elasticsearch.index", index),
+			attribute.String("db.elasticsearch.id", id),
+		)
+	}
 	res, err := c.es.Get(index, id)
 	if err != nil {
-		span.RecordError(err)
+		if span != nil {
+			span.RecordError(err)
+		}
 		return nil, fmt.Errorf("searchx/es get: %w", err)
 	}
 	defer res.Body.Close()
-	var doc searchx.Document
-	if err := json.NewDecoder(res.Body).Decode(&doc); err != nil {
+	// 只取 _source：ES 的 Get 响应是一层信封（_index/_id/found/_source…），
+	// 直接解码整包会把信封字段当成业务字段返回给调用方。
+	var envelope struct {
+		Found  bool             `json:"found"`
+		Source searchx.Document `json:"_source"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&envelope); err != nil {
 		return nil, err
 	}
-	return doc, nil
+	if !envelope.Found {
+		return nil, fmt.Errorf("searchx/es get: document %q not found in index %q", id, index)
+	}
+	return envelope.Source, nil
 }
 
 func (c *ClientImpl) Delete(ctx context.Context, index, id string) error {
@@ -124,10 +165,12 @@ func (c *ClientImpl) Delete(ctx context.Context, index, id string) error {
 		ctx, span = c.tracer.Start(ctx, "db.elasticsearch.delete")
 		defer span.End()
 	}
-	span.SetAttributes(
-		attribute.String("db.elasticsearch.index", index),
-		attribute.String("db.elasticsearch.id", id),
-	)
+	if span != nil {
+		span.SetAttributes(
+			attribute.String("db.elasticsearch.index", index),
+			attribute.String("db.elasticsearch.id", id),
+		)
+	}
 	res, err := c.es.Delete(index, id)
 	if err != nil {
 		c.logger.ErrorContext(ctx, "searchx/es delete failed", logx.Err(err), logx.String("index", index), logx.String("id", id))
@@ -144,15 +187,21 @@ func (c *ClientImpl) Search(ctx context.Context, index, query string) (*searchx.
 		ctx, span = c.tracer.Start(ctx, "db.elasticsearch.search")
 		defer span.End()
 	}
-	span.SetAttributes(
-		attribute.String("db.elasticsearch.index", index),
-	)
+	if span != nil {
+		span.SetAttributes(
+			attribute.String("db.elasticsearch.index", index),
+		)
+	}
 	var req map[string]interface{}
 	if query != "" {
+		// 用 multi_match + 通配字段，而不是 match _all：
+		// _all 元字段在 ES 6 起废弃、7 起移除，对 7.x 查询恒返回 0 命中且不报错，
+		// 是那种"看起来通了其实没检到"的静默失效。通配字段则与索引映射无关。
 		req = map[string]interface{}{
 			"query": map[string]interface{}{
-				"match": map[string]interface{}{
-					"_all": query,
+				"multi_match": map[string]interface{}{
+					"query":  query,
+					"fields": []string{"*"},
 				},
 			},
 		}
@@ -168,10 +217,15 @@ func (c *ClientImpl) Search(ctx context.Context, index, query string) (*searchx.
 		return nil, fmt.Errorf("searchx/es search: %w", err)
 	}
 	defer res.Body.Close()
+	// 字段名必须带 json tag：ES 的响应键是 _source，而 Go 的无 tag 字段
+	// 只会按 "Source" 去匹配，结果全部命中但 Source 恒为 nil —— 命中数对、内容空，
+	// 比直接报错更难发现。
 	var result struct {
 		Hits struct {
 			Total struct{ Value int }
-			Hits  []struct{ Source searchx.Document }
+			Hits  []struct {
+				Source searchx.Document `json:"_source"`
+			}
 		}
 	}
 	if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
