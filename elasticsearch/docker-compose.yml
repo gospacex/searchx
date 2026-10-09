@@ -1,0 +1,42 @@
+# searchx/elasticsearch（ES 7.6.2 单节点） - 独立开发环境
+# 用法：scripts/start.sh / scripts/verify.sh / scripts/stop.sh
+# 服务定义与 searchx/docker-compose.yml 中对应段一致，只改了容器名与网络名前缀，
+# 避免与根 compose（一次起全套）重名冲突。
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+
+  elasticsearch:
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/elasticsearch:7.6.2
+    cpus: "0.5"
+    container_name: hubx-searchx-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - "ES_TMPDIR=/tmp"
+      - "cluster.routing.allocation.disk.threshold_enabled=false"
+    ports:
+      - "${HOST_PORT:-9200}:9200"
+      - "9300:9300"
+    volumes:
+      - ./data/elasticsearch:/usr/share/elasticsearch/data
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    logging: *default-logging
+
+networks:
+  default:
+    name: hubx-searchx-elasticsearch-net
+    driver: bridge
